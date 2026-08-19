@@ -1,0 +1,26 @@
+# Root app manifest for Databricks Apps. Deploy source = this repo root so that
+# agent/, mcp_server/ and config/ are all present. --app-dir agent puts the agent
+# modules on sys.path (flat imports), while mcp_client/config_loader resolve their
+# siblings via __file__-relative paths.
+command:
+  - uvicorn
+  - app:app
+  - --app-dir
+  - agent
+  - --host
+  - 0.0.0.0
+  - --port
+  - "8000"
+
+env:
+  - name: MCP_SERVER_URL
+    value: "in-process"
+  - name: BSP_PROVIDER
+    value: "simulator"
+  - name: VS_ENDPOINT
+    value: "whatsapp-agent-vs"
+  # MLflow tracing: log every turn to this experiment (app SP has CAN_EDIT)
+  - name: MLFLOW_TRACKING_URI
+    value: "databricks"
+  - name: MLFLOW_EXPERIMENT_ID
+    value: "1154190824408236"

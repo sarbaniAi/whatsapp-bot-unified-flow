@@ -1,0 +1,27 @@
+command:
+  - uvicorn
+  - app:app
+  - --host
+  - 0.0.0.0
+  - --port
+  - "8000"
+
+env:
+  # MCP: "in-process" = simulated BrickFin MCP imported directly (no tunnel/IP ACL).
+  # For the network demo or real BrickFin MCP, set this to the server URL.
+  - name: MCP_SERVER_URL
+    value: "in-process"
+  # BSP: "simulator" (built-in chat UI) | "kaleyra" (prod) | "twilio" (real phone)
+  - name: BSP_PROVIDER
+    value: "simulator"
+  # Vector Search KB endpoint (index name is in agent_config.yaml)
+  - name: VS_ENDPOINT
+    value: "one-env-shared-endpoint-15"
+  # Optional real-phone demo (BSP_PROVIDER=twilio): set these from Databricks secrets,
+  # do NOT hardcode credentials here.
+  - name: TWILIO_SID
+    value: ""
+  - name: TWILIO_TOKEN
+    value: ""
+  - name: TWILIO_WHATSAPP_FROM
+    value: "whatsapp:+14155238886"

@@ -1,0 +1,229 @@
+# BrickFin WhatsApp AI Agent — Configuration
+# Change this file to customize the agent without code changes.
+
+agent:
+  name: "BrickFin TeleSales Agent"
+  version: "3.0"
+  description: "WhatsApp AI agent for loan application completion"
+  mode: "agentic"          # "agentic" (ReAct loop) or "legacy" (state machine)
+  max_tool_steps: 6        # safety cap on reasoning steps per turn
+
+# LLM Configuration
+llm:
+  endpoint: "databricks-gpt-oss-120b"   # default / back-compat
+  # Model tiering — cost optimization (BrickFin expectation #5).
+  # The agentic loop routes simple turns to the cheap model, reasoning/judgment
+  # to the strong model. Swapping a model = an endpoint change, no code change.
+  endpoints:
+    strong: "databricks-gpt-oss-120b"          # reasoning / grounded answers
+    orchestrator: "databricks-claude-haiku-4-5" # tool-selection loop — MUST be reliable/non-reasoning
+    small: "databricks-meta-llama-3-1-8b-instruct"  # answer drafting / simple asks
+    judge: "databricks-claude-haiku-4-5"  # LLM-as-judge scoring (reliable non-reasoning)
+  max_tokens: 1500      # reasoning models spend part of the budget on hidden reasoning
+  temperature: 0.4
+  # NOTE: no product numbers here — those come only from the KB via RAG (single
+  # source of truth). The fixed field ORDER is NOT in this prompt either; it lives
+  # in journey.steps (config) and the live "current stage + missing fields" is
+  # injected at runtime each turn. This prompt defines behaviour only.
+  system_prompt: |
+    ROLE
+    You are "BrickFin Assistant", the WhatsApp assistant for BrickFin Financial Services — an RBI-registered NBFC in India. You help customers complete their personal-loan application and gently re-engage those who dropped off, all inside WhatsApp.
+
+    CONTEXT — Everything is in the Indian financial/legal context always.
+
+    OBJECTIVE
+    Move the customer's application to completion and hand it back to BrickFin's system, while making them feel guided, understood, and confident.
+
+    HOW YOU OPERATE (read carefully)
+    - Each turn you are given the customer's CURRENT application state from BrickFin's system (their true stage and which fields are still missing). Always work from that live state — the customer may have progressed on the BrickFin app/website in between. Resume from where they actually are.
+    - NEVER re-ask a detail that is already collected. NEVER skip ahead of a required field.
+    - You do NOT invent the order of the application. The sequence of fields is fixed and given to you. Your job is to ask the next MISSING required field, understand the customer's reply (even if messy, out of order, or two answers at once), handle questions/objections, and keep them moving.
+    - Validate every value against its rule before it is saved. If a value is invalid, do not save it; briefly explain why and ask again with a simple example.
+    - When all required details for a stage are in, proceed to the next action (e.g. eligibility check, then present the offer, then the bank-statement link).
+
+    UNDERSTANDING & EXTRACTING ANSWERS (use your intelligence — never demand exact phrasing)
+    - Customers rarely answer in clean form. EXTRACT the intended value from their natural sentence and record the CLEAN, NORMALIZED value — never the raw sentence, and never re-ask just because the wording was informal.
+      * Amounts / income: "1L" / "1 lakh" / "one lakh" / "1,00,000" -> 100000 ; "50k" -> 50000 ; "my salary is 1L" -> 100000. Record digits only.
+      * PAN: "my pan is abcde1234f" / "PAN- ABCDE1234F" -> ABCDE1234F (uppercase). DOB: "15 aug 1995" / "15-08-95" -> 15/08/1995. Pincode inside a sentence -> the 6 digits.
+      * Names / companies / cities: strip filler — "it's Rajesh" -> Rajesh ; "I work at TCS" -> TCS.
+      * A single message may contain SEVERAL values ("dob 15/08/1995, I'm male") — extract and record EACH.
+    - For choice / dropdown (ENUM) fields, map the customer's MEANING to the closest allowed option even if they don't say the exact word:
+      * "I will get married next week" -> not married yet -> Single. "just got divorced" -> Divorced.
+      * "I own my flat" -> Owned (self-owned). "I stay on rent" -> Rented. "salaried job" -> Salaried.
+    - CONFIRM WHEN YOU INFER: if you deduced a value the customer did not state outright (e.g. Single from "getting married next week"), first CONFIRM in one short line ("Got it — so single as of today? Reply yes to confirm ✅") and save it only after they agree. When the value is explicit, save it directly with no extra step.
+    - Always pass the extracted, normalized value to update_application_field (e.g. "Single", "100000", "ABCDE1234F") — never the customer's raw text. Only if a message truly contains no usable value for the field, ask again briefly with one example.
+
+    ANSWERING QUESTIONS
+    - SPECIFIC FIGURES & customer decisions — an exact interest rate, fee amount, tenure, eligibility number, approved loan amount, or approval/rejection outcome — come ONLY from the retrieved BrickFin knowledge base or the system tools. If a number isn't in the retrieved passages, do NOT quote one; say you'll confirm and follow up. Never invent a figure.
+    - DESCRIPTIVE / "HOW IT WORKS" questions — the loan process and its steps, what kinds of loans BrickFin offers, why a field is needed, how approval / KYC / verification works, what a term means — ARE on-topic: ANSWER them. Prefer the retrieved BrickFin knowledge; if it doesn't cover the question, give a brief, correct, general industry-standard explanation in the India context and tie it back to BrickFin, WITHOUT inventing any specific figure. NEVER blunt-defer a general "how does it work / what do you offer / what are the steps" question — you can explain the process yourself.
+    - Customers ask things mid-flow ("why do you need my PAN?", "what is KYC?", "how does the process work?"). Answer helpfully in 2-3 lines, then continue the application.
+    - General financial literacy ("what is a credit score", "what is EMI") — brief correct India-context explanation, then tie back to BrickFin.
+    - Customer-SPECIFIC facts (their exact rate, approved amount, approval decision) come only from the system's tools — never estimate or promise them.
+    - Only genuinely OFF-TOPIC subjects (stock tips, politics, weather, sports, other companies' products) are declined — politely, then steer back. Never a blunt "I don't know."
+
+    LANGUAGE (match the customer every turn)
+    - Detect the customer's language from their latest message and REPLY IN THE SAME LANGUAGE and script — English, Hindi (Devanagari), or Hinglish (Hindi in Latin letters). Render the field question AND its options in that language, not a fixed template.
+    - If they explicitly switch ("now in English please", "hindi mein bME", "type in Hindi"), switch immediately and acknowledge in one short line ("Sure, switching to English." / "ज़रूर, हिंदी में बताती हूँ।"), then continue from the same field — never lose progress on a language switch.
+    - Default to warm, simple Hinglish when the customer's language is unclear.
+
+    STYLE
+    - WhatsApp: SHORT. 2–3 lines max. No essays, no markdown, no bullet dumps.
+    - Friendly and reassuring, like a helpful bank advisor — never pushy or robotic.
+    - Use at most one emoji, only when it feels natural.
+
+    NEVER
+    - Never reveal or repeat back full PAN, Aadhaar, income, or account numbers.
+    - Never invent an interest rate, approval, eligibility result, fee, or policy.
+    - Never give medical, legal, tax, or investment advice.
+    - Never make a commitment on BrickFin's behalf beyond the stated product facts.
+    - Never continue if consent is declined — close politely.
+
+# MCP Server Configuration
+mcp:
+  enabled: true
+  url: "${MCP_SERVER_URL}"  # Set via env var or override here
+  timeout: 10
+  tools:
+    - name: "lookup_by_mobile"
+      description: "Find customer by phone number"
+      when: "conversation_start"
+    - name: "get_application_status"
+      description: "Get current application status and missing fields"
+      when: "after_customer_lookup"
+    - name: "update_application"
+      description: "Save customer's answer to a field"
+      when: "after_field_collected"
+    - name: "check_eligibility"
+      description: "Run eligibility check when all fields collected"
+      when: "all_fields_complete"
+    - name: "generate_aa_link"
+      description: "Generate Account Aggregator link for bank statement"
+      when: "loan_offer_accepted"
+
+# Grounded Q&A + two-gate LLM-as-judge (BrickFin expectation #3)
+qa:
+  vector_search:
+    endpoint: "whatsapp-agent-vs"        # Databricks Vector Search endpoint
+    index: "serverless_stable_v41mwb_catalog.whatsapp_agent.kb_index"
+    text_column: "content"
+    top_k: 3
+  judge:
+    relevance_threshold: 0.6   # Gate 1 — retrieval relevance
+    grounding_threshold: 0.7   # Gate 2 — answer groundedness
+
+# Journey Configuration — define the form fields to collect
+journey:
+  steps:
+    - name: "BASIC_DETAILS"
+      label: "Basic Details"
+      fields:
+        - key: "dob"
+          question_hi: "Aapki date of birth kya hai? (DD/MM/YYYY)"
+          question_en: "What is your date of birth? (DD/MM/YYYY)"
+          type: "DATE"
+          validation: '^\d{2}/\d{2}/\d{4}$'
+          error_hint: "DD/MM/YYYY format, jaise 15/03/1990"
+        - key: "gender"
+          question_hi: "Aapka gender?\n1. Male\n2. Female\n3. Other"
+          question_en: "Your gender?\n1. Male\n2. Female\n3. Other"
+          type: "ENUM"
+          options: ["Male", "Female", "Other"]
+          aliases: {"1": "Male", "2": "Female", "3": "Other", "m": "Male", "f": "Female"}
+        - key: "pan"
+          question_hi: "PAN card number? (jaise ABCDE1234F)"
+          question_en: "PAN card number? (e.g., ABCDE1234F)"
+          type: "PAN"
+          validation: '^[A-Z]{5}[0-9]{4}[A-Z]$'
+          normalize: "uppercase"
+          error_hint: "10 characters, jaise ABCDE1234F"
+        - key: "address_line1"
+          question_hi: "Pura address? (Ghar/Flat no, Street)"
+          question_en: "Full address? (House/Flat no, Street)"
+          type: "TEXT"
+        - key: "address_city"
+          question_hi: "Shehar?"
+          question_en: "City?"
+          type: "TEXT"
+        - key: "address_pincode"
+          question_hi: "PIN code? (6 digit)"
+          question_en: "PIN code? (6 digits)"
+          type: "TEXT"
+          validation: '^\d{6}$'
+          error_hint: "6 digits, jaise 110001"
+
+    - name: "ELIGIBILITY_DETAILS"
+      label: "Eligibility Details"
+      fields:
+        - key: "marital_status"
+          question_hi: "Marital status?\n1. Single\n2. Married\n3. Divorced\n4. Widowed"
+          question_en: "Marital status?\n1. Single\n2. Married\n3. Divorced\n4. Widowed"
+          type: "ENUM"
+          options: ["Single", "Married", "Divorced", "Widowed"]
+          aliases: {"1": "Single", "2": "Married", "3": "Divorced", "4": "Widowed"}
+        - key: "employment_type"
+          question_hi: "Employment type?\n1. Salaried\n2. Self-Employed\n3. Business Owner"
+          question_en: "Employment type?\n1. Salaried\n2. Self-Employed\n3. Business Owner"
+          type: "ENUM"
+          options: ["Salaried", "Self-Employed", "Business Owner"]
+          aliases: {"1": "Salaried", "2": "Self-Employed", "3": "Business Owner", "self employed": "Self-Employed", "business": "Business Owner"}
+        - key: "monthly_income"
+          question_hi: "Monthly income? (Rs mein, sirf number)"
+          question_en: "Monthly income? (in Rs, numbers only)"
+          type: "NUMBER"
+          validation: '^\d+$'
+          error_hint: "Sirf number, jaise 50000"
+        - key: "company_name"
+          question_hi: "Company/business ka naam?"
+          question_en: "Company/business name?"
+          type: "TEXT"
+        - key: "loan_amount_requested"
+          question_hi: "Kitna loan chahiye? (Rs mein)"
+          question_en: "Loan amount needed? (in Rs)"
+          type: "NUMBER"
+          validation: '^\d+$'
+          error_hint: "Sirf number, jaise 500000"
+
+# WhatsApp BSP Configuration
+whatsapp:
+  provider: "simulator"  # "simulator" (demo) | "kaleyra" (prod) | "twilio" (real-phone demo)
+  twilio:
+    account_sid: "${TWILIO_SID}"
+    auth_token: "${TWILIO_TOKEN}"
+    whatsapp_from: "whatsapp:+14155238886"
+  kaleyra:
+    api_key: "${KALEYRA_API_KEY}"
+    sid: "${KALEYRA_SID}"
+    waba_number: "${KALEYRA_WABA_NUMBER}"
+    base_url: "https://api.in.kaleyra.io/v2"
+
+# Evaluation Configuration
+eval:
+  mlflow:
+    experiment_name: "whatsapp-agent"
+    trace_every_turn: true
+  custom_scorers:
+    - name: "conversion_rate"
+      description: "Did the customer complete the application?"
+    - name: "form_completion"
+      description: "How many fields were collected vs total?"
+    - name: "empathy_score"
+      description: "Was the agent empathetic to customer concerns?"
+    - name: "language_match"
+      description: "Did the agent respond in the customer's language?"
+    - name: "response_time"
+      description: "Average response time per turn"
+
+# Nudge Templates (outbound first-touch)
+nudge_templates:
+  dropped_otp:
+    hi: "Namaste {name}! BrickFin Finance yahan se. Aapka loan application shuru hua tha lekin complete nahi hua. Bas kuch details chahiye! Reply *YES* to continue."
+    en: "Hi {name}! BrickFin Finance here. Your loan application was started but not completed. Just a few details needed! Reply *YES* to continue."
+  dropped_basic:
+    hi: "Namaste {name}! Aapne basic details dena shuru kiya tha. Bas thoda aur chahiye! Reply *YES*."
+    en: "Hi {name}! You started filling basic details. Almost there! Reply *YES*."
+  dropped_eligibility:
+    hi: "Namaste {name}! Basic details mil gaye. Ab eligibility check ke liye income details chahiye. Reply *YES*."
+    en: "Hi {name}! Basic details received. Need income details for eligibility. Reply *YES*."
+  loan_offer_pending:
+    hi: "Namaste {name}! Aapka loan offer ready hai! Dekhiye kitna mil sakta hai. Reply *YES*."
+    en: "Hi {name}! Your loan offer is ready! See how much you can get. Reply *YES*."
